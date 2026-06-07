@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Avatar, AvatarState } from "./Avatar";
 import { Tabs } from "./Tabs";
-import { X, Settings } from "lucide-react";
+import { ReflectionPanel } from "./ReflectionPanel";
+import { X, Settings, BookOpen } from "lucide-react";
 
 interface FloatingWidgetProps {
   username?: string;
@@ -13,6 +14,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
   const [activeTab, setActiveTab] = useState<"chat" | "context" | "goals" | "habits" | "learn">("chat");
   const [avatarState, setAvatarState] = useState<AvatarState>("idle");
   const [cognitiveMessage, setCognitiveMessage] = useState<string>("");
+  const [showReflection, setShowReflection] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -106,6 +108,13 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
 
             <div className="flex items-center space-x-2 text-slate-400">
               <button
+                onClick={() => setShowReflection(true)}
+                title="Daily Reflection"
+                className="p-1 hover:text-white rounded hover:bg-white/[0.04] active:scale-95 transition-all cursor-pointer"
+              >
+                <BookOpen size={15} />
+              </button>
+              <button
                 onClick={onOpenSettings}
                 title="Settings Dashboard"
                 className="p-1 hover:text-white rounded hover:bg-white/[0.04] active:scale-95 transition-all cursor-pointer"
@@ -125,6 +134,8 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
           <Tabs username={username} activeTab={activeTab} onTabChange={setActiveTab} />
         </div>
       )}
+
+      <ReflectionPanel open={showReflection} onClose={() => setShowReflection(false)} />
     </div>
   );
 };

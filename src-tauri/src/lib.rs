@@ -397,6 +397,26 @@ fn normalize_fts_query(raw: &str) -> String {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbReflection {
+    pub date: String,
+    pub journal_wins: Option<String>,
+    pub journal_drag: Option<String>,
+    pub journal_tomorrow: Option<String>,
+    pub narrative: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DailySummary {
+    pub date: String,
+    pub focus_minutes_per_category: Vec<(String, i64)>,
+    pub total_captures: i64,
+    pub habits_completed: i64,
+    pub habits_total: i64,
+    pub narrative: String,
+    pub reflection: Option<DbReflection>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct DbContact {
     pub id: String,
     pub name: String,
@@ -521,6 +541,114 @@ async fn teacher_explain(
     .await
     .map_err(|e| e.to_string())?;
     Ok(topic)
+}
+
+#[tauri::command]
+async fn get_daily_summary(
+    date: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<DailySummary, String> {
+    // SQLite 'localtime' so the day boundary tracks the user's clock.
+    let target = date.unwrap_or_else(|| "now".to_string());
+    let date_filter = if target == "now" {
+        "date('now', 'localtime')".to_string()
+    } else {
+        format!("'{}'", target.replace('\'', ""))
+    };
+
+    let date_str: (String,) = sqlx::query_as(&format!("SELECT {} as d", date_filter))
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Each capture stands for one 10-second slice. We bucket by category and
+    // convert slice counts back to minutes.
+    let buckets: Vec<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT category, COUNT(*) as slices
+         FROM screen_captures
+         WHERE date(captured_at, 'localtime') = {}
+         GROUP BY category
+         ORDER BY slices DESC",
+        date_filter
+    ))
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let focus_minutes_per_category: Vec<(String, i64)> = buckets
+        .iter()
+        .map(|(cat, slices)| (cat.clone(), (*slices * 10) / 60))
+        .collect();
+    let total_captures: i64 = buckets.iter().map(|(_, n)| *n).sum();
+
+    let habit_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM habits")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let habits_done: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM habit_completions WHERE date(completed_at, 'localtime') = {}",
+        date_filter
+    ))
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let top = focus_minutes_per_category
+        .first()
+        .map(|(c, m)| format!("{} for {} minutes", c, m))
+        .unwrap_or_else(|| "nothing captured".to_string());
+    let narrative = format!(
+        "Today you spent the most time {}. {}/{} habits checked off.",
+        top, habits_done.0, habit_count.0
+    );
+
+    let reflection = sqlx::query_as::<_, DbReflection>(
+        "SELECT date, journal_wins, journal_drag, journal_tomorrow, narrative FROM daily_reflections WHERE date = ?",
+    )
+    .bind(&date_str.0)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(DailySummary {
+        date: date_str.0,
+        focus_minutes_per_category,
+        total_captures,
+        habits_completed: habits_done.0,
+        habits_total: habit_count.0,
+        narrative,
+        reflection,
+    })
+}
+
+#[tauri::command]
+async fn save_daily_reflection(
+    date: String,
+    journal_wins: Option<String>,
+    journal_drag: Option<String>,
+    journal_tomorrow: Option<String>,
+    narrative: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO daily_reflections (date, journal_wins, journal_drag, journal_tomorrow, narrative)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(date) DO UPDATE SET
+            journal_wins = excluded.journal_wins,
+            journal_drag = excluded.journal_drag,
+            journal_tomorrow = excluded.journal_tomorrow,
+            narrative = excluded.narrative,
+            updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(date)
+    .bind(journal_wins)
+    .bind(journal_drag)
+    .bind(journal_tomorrow)
+    .bind(narrative)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -918,6 +1046,21 @@ pub fn run() {
                     .execute(&pool)
                     .await?;
 
+                // Phase 11 - daily reflections
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS daily_reflections (
+                        date TEXT PRIMARY KEY,
+                        journal_wins TEXT,
+                        journal_drag TEXT,
+                        journal_tomorrow TEXT,
+                        narrative TEXT,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_user ON user_preferences(user_id);")
                     .execute(&pool)
                     .await?;
@@ -1191,7 +1334,9 @@ pub fn run() {
             touch_contact,
             get_commitments,
             create_commitment,
-            resolve_commitment
+            resolve_commitment,
+            get_daily_summary,
+            save_daily_reflection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
