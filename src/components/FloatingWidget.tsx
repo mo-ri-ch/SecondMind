@@ -1,13 +1,14 @@
 import React, { useState } from "react";
 import { Avatar } from "./Avatar";
 import { Tabs } from "./Tabs";
-import { X, Settings, ExternalLink } from "lucide-react";
+import { X, Settings } from "lucide-react";
 
 interface FloatingWidgetProps {
+  username?: string;
   onOpenSettings?: () => void;
 }
 
-export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onOpenSettings }) => {
+export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex", onOpenSettings }) => {
   const [mode, setMode] = useState<"minimal" | "expanded">("minimal");
   const [activeTab, setActiveTab] = useState<"chat" | "context" | "goals" | "habits">("chat");
   const [avatarState, setAvatarState] = useState<"idle" | "thinking" | "speaking" | "attention">("idle");
@@ -71,7 +72,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ onOpenSettings }
           </div>
 
           {/* Body and Tab routing */}
-          <Tabs activeTab={activeTab} onTabChange={setActiveTab} />
+          <Tabs username={username} activeTab={activeTab} onTabChange={setActiveTab} />
         </div>
       )}
     </div>

@@ -1,10 +1,315 @@
 use tauri::Manager;
+use tauri::Emitter;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::str::FromStr;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+pub struct DbState {
+    pub pool: sqlx::SqlitePool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: String,
+    pub name: String,
+    pub timezone: String,
+    pub language: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct Preference {
+    pub category: String,
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbGoal {
+    pub id: String,
+    pub title: String,
+    pub why_it_matters: String,
+    pub goal_type: String,
+    pub progress_percent: i32,
+    pub target_date: String,
+    pub status: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbHabit {
+    pub id: String,
+    pub name: String,
+    pub completed: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ChatStatusPayload {
+    status: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ChatTokenPayload {
+    token: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ActiveWindowPayload {
+    app_name: String,
+    title: String,
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+async fn get_user_profile(state: tauri::State<'_, DbState>) -> Result<User, String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match user {
+        Some(u) => Ok(u),
+        None => Err("No user profile found".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn update_user_profile(
+    name: String,
+    timezone: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    sqlx::query("UPDATE users SET name = ?, timezone = ?, updated_at = CURRENT_TIMESTAMP")
+        .bind(name)
+        .bind(timezone)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_user_preferences(state: tauri::State<'_, DbState>) -> Result<Vec<Preference>, String> {
+    let prefs = sqlx::query_as::<_, Preference>(
+        "SELECT category, key, value FROM user_preferences"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(prefs)
+}
+
+#[tauri::command]
+async fn update_user_preference(
+    category: String,
+    key: String,
+    value: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let user_id = match user {
+        Some(u) => u.id,
+        None => return Err("No user profile found to associate preference".to_string()),
+    };
+
+    sqlx::query(
+        "INSERT INTO user_preferences (user_id, category, key, value, updated_at) 
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id, category, key) DO UPDATE SET 
+            value = excluded.value, 
+            updated_at = CURRENT_TIMESTAMP"
+    )
+    .bind(user_id)
+    .bind(category)
+    .bind(key)
+    .bind(value)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_chat_stream(
+    app: tauri::AppHandle,
+    prompt: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn(async move {
+        let _ = app.emit("chat-status", ChatStatusPayload { status: "thinking".to_string() });
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let _ = app.emit("chat-status", ChatStatusPayload { status: "streaming".to_string() });
+
+        let response = format!(
+            "I've received your request: \"{}\". This response is streamed directly from the Rust backend via Tauri IPC events! In Phase 7, I will match this query with historical context from vector search, and in Phase 12 I will speak it out loud.",
+            prompt
+        );
+
+        for word in response.split_whitespace() {
+            tokio::time::sleep(std::time::Duration::from_millis(70)).await;
+            let _ = app.emit("chat-token", ChatTokenPayload { token: format!("{} ", word) });
+        }
+
+        let _ = app.emit("chat-status", ChatStatusPayload { status: "done".to_string() });
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_goals(state: tauri::State<'_, DbState>) -> Result<Vec<DbGoal>, String> {
+    let goals = sqlx::query_as::<_, DbGoal>(
+        "SELECT id, title, why_it_matters, type as goal_type, progress_percent, target_date, status FROM goals"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(goals)
+}
+
+#[tauri::command]
+async fn create_goal(
+    id: String,
+    title: String,
+    why: String,
+    goal_type: String,
+    target_date: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let user_id = match user {
+        Some(u) => u.id,
+        None => return Err("No user profile found to associate goal".to_string()),
+    };
+
+    sqlx::query(
+        "INSERT INTO goals (id, user_id, title, why_it_matters, type, progress_percent, target_date, status) 
+         VALUES (?, ?, ?, ?, ?, 0, ?, 'active')"
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(title)
+    .bind(why)
+    .bind(goal_type)
+    .bind(target_date)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_goal(id: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("DELETE FROM goals WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_habits(state: tauri::State<'_, DbState>) -> Result<Vec<DbHabit>, String> {
+    let habits = sqlx::query_as::<_, DbHabit>(
+        "SELECT h.id, h.name, 
+         EXISTS(SELECT 1 FROM habit_completions WHERE habit_id = h.id AND date(completed_at) = date('now', 'localtime')) as completed 
+         FROM habits h"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(habits)
+}
+
+#[tauri::command]
+async fn create_habit(id: String, name: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let user_id = match user {
+        Some(u) => u.id,
+        None => return Err("No user profile found to associate habit".to_string()),
+    };
+
+    sqlx::query("INSERT INTO habits (id, user_id, name) VALUES (?, ?, ?)")
+        .bind(id)
+        .bind(user_id)
+        .bind(name)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_habit(id: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("DELETE FROM habits WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_habit_completion(habit_id: String, state: tauri::State<'_, DbState>) -> Result<bool, String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let user_id = match user {
+        Some(u) => u.id,
+        None => return Err("No user profile found to associate habit completion".to_string()),
+    };
+
+    let completion_id: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM habit_completions WHERE habit_id = ? AND date(completed_at) = date('now', 'localtime') LIMIT 1"
+    )
+    .bind(&habit_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match completion_id {
+        Some((id,)) => {
+            sqlx::query("DELETE FROM habit_completions WHERE id = ?")
+                .bind(id)
+                .execute(&state.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+        None => {
+            let new_comp_id = format!("comp_{}_{}", habit_id, date_timestamp_string());
+            sqlx::query("INSERT INTO habit_completions (id, habit_id, user_id, completed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)")
+                .bind(new_comp_id)
+                .bind(habit_id)
+                .bind(user_id)
+                .execute(&state.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+    }
+}
+
+fn date_timestamp_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let start = SystemTime::now();
+    let since_the_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
+    since_the_epoch.as_millis().to_string()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,6 +337,275 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Setup SQLite Database
+            let app_data_dir = app.path().app_data_dir().map_err(|e| tauri::Error::Setup(Box::new(e)))?;
+            std::fs::create_dir_all(&app_data_dir).map_err(|e| tauri::Error::Setup(Box::new(e)))?;
+            let db_path = app_data_dir.join("second_mind.db");
+            let db_url = format!("sqlite://{}", db_path.to_string_lossy());
+
+            let options = SqliteConnectOptions::from_str(&db_url)
+                .map_err(|e| tauri::Error::Setup(Box::new(e)))?
+                .create_if_missing(true);
+
+            let pool = tauri::async_runtime::block_on(async {
+                SqlitePoolOptions::new()
+                    .connect_with(options)
+                    .await
+            }).map_err(|e| tauri::Error::Setup(Box::new(e)))?;
+
+            // Initialize DB Schema and Default Data
+            tauri::async_runtime::block_on(async {
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS users (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        timezone TEXT NOT NULL DEFAULT 'UTC',
+                        language TEXT NOT NULL DEFAULT 'en',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        onboarding_completed_at DATETIME,
+                        last_active_at DATETIME
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS user_preferences (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        category TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'explicit',
+                        confidence REAL NOT NULL DEFAULT 1.0,
+                        evidence TEXT,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, category, key)
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS goals (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        why_it_matters TEXT,
+                        type TEXT NOT NULL,
+                        progress_percent INTEGER NOT NULL DEFAULT 0,
+                        target_date TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS habits (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT 'routine',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS habit_completions (
+                        id TEXT PRIMARY KEY,
+                        habit_id TEXT NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_user ON user_preferences(user_id);")
+                    .execute(&pool)
+                    .await?;
+                
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_category ON user_preferences(user_id, category);")
+                    .execute(&pool)
+                    .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_goals_user ON goals(user_id);")
+                    .execute(&pool)
+                    .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id);")
+                    .execute(&pool)
+                    .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_habit_completions_habit ON habit_completions(habit_id);")
+                    .execute(&pool)
+                    .await?;
+
+                // Seed Default User
+                let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+                    .fetch_one(&pool)
+                    .await?;
+
+                let default_user_id = "default_user";
+                if user_count.0 == 0 {
+                    sqlx::query(
+                        "INSERT INTO users (id, name, timezone, language) VALUES (?, ?, ?, ?)"
+                    )
+                    .bind(default_user_id)
+                    .bind("Alex")
+                    .bind("UTC")
+                    .bind("en")
+                    .execute(&pool)
+                    .await?;
+
+                    // Seed Default Preferences
+                    sqlx::query(
+                        "INSERT INTO user_preferences (id, user_id, category, key, value) VALUES (?, ?, ?, ?, ?)"
+                    )
+                    .bind("pref_theme")
+                    .bind(default_user_id)
+                    .bind("ui")
+                    .bind("theme")
+                    .bind("\"dark\"")
+                    .execute(&pool)
+                    .await?;
+
+                    sqlx::query(
+                        "INSERT INTO user_preferences (id, user_id, category, key, value) VALUES (?, ?, ?, ?, ?)"
+                    )
+                    .bind("pref_proactivity")
+                    .bind(default_user_id)
+                    .bind("intervention")
+                    .bind("proactivity")
+                    .bind("80")
+                    .execute(&pool)
+                    .await?;
+                }
+
+                // Seed Default Goals
+                let goal_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM goals")
+                    .fetch_one(&pool)
+                    .await?;
+                if goal_count.0 == 0 {
+                    sqlx::query(
+                        "INSERT INTO goals (id, user_id, title, why_it_matters, type, progress_percent, target_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind("goal_1")
+                    .bind(default_user_id)
+                    .bind("Build Authentication System")
+                    .bind("Secures user cognitive graph and settings")
+                    .bind("quarterly")
+                    .bind(67)
+                    .bind("2026-06-30")
+                    .execute(&pool)
+                    .await?;
+
+                    sqlx::query(
+                        "INSERT INTO goals (id, user_id, title, why_it_matters, type, progress_percent, target_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind("goal_2")
+                    .bind(default_user_id)
+                    .bind("Complete NLP Model Integration")
+                    .bind("Local Phi-3.5 cognitive modeling")
+                    .bind("quarterly")
+                    .bind(43)
+                    .bind("2026-06-30")
+                    .execute(&pool)
+                    .await?;
+
+                    sqlx::query(
+                        "INSERT INTO goals (id, user_id, title, why_it_matters, type, progress_percent, target_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind("goal_3")
+                    .bind(default_user_id)
+                    .bind("Master Spaced Repetition Engine")
+                    .bind("Adaptive learning system core")
+                    .bind("quarterly")
+                    .bind(12)
+                    .bind("2026-06-30")
+                    .execute(&pool)
+                    .await?;
+                }
+
+                // Seed Default Habits
+                let habit_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM habits")
+                    .fetch_one(&pool)
+                    .await?;
+                if habit_count.0 == 0 {
+                    sqlx::query("INSERT INTO habits (id, user_id, name, category) VALUES (?, ?, ?, ?)")
+                        .bind("habit_1")
+                        .bind(default_user_id)
+                        .bind("Deep Work (2hr)")
+                        .bind("routine")
+                        .execute(&pool)
+                        .await?;
+
+                    sqlx::query("INSERT INTO habits (id, user_id, name, category) VALUES (?, ?, ?, ?)")
+                        .bind("habit_2")
+                        .bind(default_user_id)
+                        .bind("Log active learnings")
+                        .bind("routine")
+                        .execute(&pool)
+                        .await?;
+
+                    sqlx::query("INSERT INTO habits (id, user_id, name, category) VALUES (?, ?, ?, ?)")
+                        .bind("habit_3")
+                        .bind(default_user_id)
+                        .bind("Stretch & Hydrate")
+                        .bind("routine")
+                        .execute(&pool)
+                        .await?;
+
+                    sqlx::query("INSERT INTO habits (id, user_id, name, category) VALUES (?, ?, ?, ?)")
+                        .bind("habit_4")
+                        .bind(default_user_id)
+                        .bind("Evening Reflection")
+                        .bind("routine")
+                        .execute(&pool)
+                        .await?;
+
+                    // Seed Default Habit Completions for today (to match checked UI states)
+                    sqlx::query("INSERT INTO habit_completions (id, habit_id, user_id, completed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)")
+                        .bind("comp_1")
+                        .bind("habit_1")
+                        .bind(default_user_id)
+                        .execute(&pool)
+                        .await?;
+
+                    sqlx::query("INSERT INTO habit_completions (id, habit_id, user_id, completed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)")
+                        .bind("comp_3")
+                        .bind("habit_3")
+                        .bind(default_user_id)
+                        .execute(&pool)
+                        .await?;
+                }
+
+                Ok::<(), sqlx::Error>(())
+            }).map_err(|e| tauri::Error::Setup(Box::new(e)))?;
+
+            // Store pool in State
+            app.manage(DbState { pool });
+
+            // Spawn active window focus monitor loop
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Ok(active_window) = active_win_pos_rs::get_active_window() {
+                        let _ = app_handle.emit("active-window", ActiveWindowPayload {
+                            app_name: active_window.app_name,
+                            title: active_window.title,
+                        });
+                    }
+                }
+            });
+
             #[cfg(desktop)]
             {
                 let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyM);
@@ -39,8 +613,23 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet, 
+            get_user_profile, 
+            update_user_profile, 
+            get_user_preferences, 
+            update_user_preference,
+            start_chat_stream,
+            get_goals,
+            create_goal,
+            delete_goal,
+            get_habits,
+            create_habit,
+            delete_habit,
+            toggle_habit_completion
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 

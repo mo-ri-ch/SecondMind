@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { FloatingWidget } from "./components/FloatingWidget";
-import { Settings, ShieldAlert, Monitor, Terminal, Layout } from "lucide-react";
+import { Settings, ShieldAlert } from "lucide-react";
 
 function App() {
   const [isTauri, setIsTauri] = useState(false);
@@ -10,11 +10,75 @@ function App() {
   const [proactivity, setProactivity] = useState(80);
 
   useEffect(() => {
-    // Detect if running inside Tauri runtime
-    if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
-      setIsTauri(true);
+    const isTauriRuntime = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+    setIsTauri(isTauriRuntime);
+
+    async function loadData() {
+      if (isTauriRuntime) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          
+          const profile = await invoke<any>("get_user_profile");
+          if (profile && profile.name) {
+            setUsername(profile.name);
+          }
+
+          const prefs = await invoke<any[]>("get_user_preferences");
+          if (prefs) {
+            const themePref = prefs.find(p => p.key === "theme");
+            if (themePref) {
+              try {
+                setTheme(JSON.parse(themePref.value));
+              } catch {
+                setTheme(themePref.value);
+              }
+            }
+            const proactivityPref = prefs.find(p => p.key === "proactivity");
+            if (proactivityPref) {
+              setProactivity(parseInt(proactivityPref.value, 10));
+            }
+          }
+        } catch (err) {
+          console.error("Failed to load data from Tauri SQLite:", err);
+        }
+      } else {
+        // Browser Mode Fallback: Load from localStorage
+        const storedName = localStorage.getItem("sm_username");
+        if (storedName) setUsername(storedName);
+
+        const storedTheme = localStorage.getItem("sm_theme");
+        if (storedTheme) setTheme(storedTheme);
+
+        const storedProactivity = localStorage.getItem("sm_proactivity");
+        if (storedProactivity) setProactivity(parseInt(storedProactivity, 10));
+      }
     }
+
+    loadData();
   }, []);
+
+  const handleSaveSettings = async () => {
+    if (isTauri) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        
+        // Save Profile
+        await invoke("update_user_profile", { name: username, timezone: "UTC" });
+        
+        // Save Preferences
+        await invoke("update_user_preference", { category: "ui", key: "theme", value: JSON.stringify(theme) });
+        await invoke("update_user_preference", { category: "intervention", key: "proactivity", value: proactivity.toString() });
+      } catch (err) {
+        console.error("Failed to save settings to SQLite:", err);
+      }
+    } else {
+      // Browser Mode Fallback: Save to localStorage
+      localStorage.setItem("sm_username", username);
+      localStorage.setItem("sm_theme", theme);
+      localStorage.setItem("sm_proactivity", proactivity.toString());
+    }
+    setShowSettings(false);
+  };
 
   return (
     <div className={`relative min-h-screen w-full flex items-center justify-center transition-all duration-500 overflow-hidden ${
@@ -44,7 +108,7 @@ function App() {
 
       {/* 2. Floating Widget Component Container */}
       <div className="absolute bottom-8 right-8 z-40">
-        <FloatingWidget onOpenSettings={() => setShowSettings(true)} />
+        <FloatingWidget username={username} onOpenSettings={() => setShowSettings(true)} />
       </div>
 
       {/* 3. Settings/Dashboard Panel Modal */}
@@ -131,7 +195,7 @@ function App() {
             {/* Modal Footer */}
             <div className="flex justify-end px-6 py-4 bg-slate-950/20 border-t border-white/[0.06]">
               <button 
-                onClick={() => setShowSettings(false)}
+                onClick={handleSaveSettings}
                 className="bg-violet-600 hover:bg-violet-500 active:scale-95 text-white font-medium text-xs px-5 py-2 rounded-xl shadow-[0_4px_12px_rgba(139,92,246,0.3)] transition-all cursor-pointer"
               >
                 Save Preferences

@@ -106,3 +106,19 @@
 .animate-pulse-ring {
   animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
 }
+
+@keyframes particle-fade-out {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--tw-particle-x, 20px), var(--tw-particle-y, -30px)) scale(0.2);
+    opacity: 0;
+  }
+}
+
+.animate-particle {
+  animation: particle-fade-out 0.8s forwards cubic-bezier(0.1, 0.8, 0.3, 1);
+}
+
