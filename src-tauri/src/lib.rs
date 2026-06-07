@@ -1,11 +1,19 @@
+mod ocr;
+
 use tauri::Manager;
 use tauri::Emitter;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct DbState {
     pub pool: sqlx::SqlitePool,
+}
+
+pub struct CaptureState {
+    pub enabled: Arc<AtomicBool>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -39,6 +47,17 @@ pub struct DbHabit {
     pub id: String,
     pub name: String,
     pub completed: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbScreenCapture {
+    pub id: String,
+    pub captured_at: String,
+    pub app_name: String,
+    pub window_title: String,
+    pub category: String,
+    pub text: String,
+    pub confidence: f64,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -312,6 +331,74 @@ fn date_timestamp_string() -> String {
     since_the_epoch.as_millis().to_string()
 }
 
+#[tauri::command]
+async fn get_screen_captures(
+    limit: Option<i64>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<DbScreenCapture>, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let rows = sqlx::query_as::<_, DbScreenCapture>(
+        "SELECT id, captured_at, app_name, window_title, category, text, confidence
+         FROM screen_captures
+         ORDER BY captured_at DESC
+         LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn clear_screen_captures(state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("DELETE FROM screen_captures")
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_screen_capture_enabled(
+    enabled: bool,
+    capture_state: tauri::State<'_, CaptureState>,
+) -> Result<(), String> {
+    capture_state.enabled.store(enabled, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_screen_capture_enabled(capture_state: tauri::State<'_, CaptureState>) -> bool {
+    capture_state.enabled.load(Ordering::SeqCst)
+}
+
+fn capture_and_ocr_once() -> Result<(String, String, String, f64), String> {
+    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let primary = monitors
+        .into_iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| xcap::Monitor::all().ok().and_then(|m| m.into_iter().next()))
+        .ok_or_else(|| "No monitor available".to_string())?;
+
+    let image = primary.capture_image().map_err(|e| e.to_string())?;
+    let (width, height) = (image.width(), image.height());
+    let rgba = image.into_raw();
+
+    let text = ocr::ocr_rgba(width, height, &rgba)?;
+
+    let (app_name, window_title) = match active_win_pos_rs::get_active_window() {
+        Ok(w) => (w.app_name, w.title),
+        Err(_) => (String::new(), String::new()),
+    };
+
+    let category = ocr::categorize_activity(&app_name, &text).to_string();
+    // Cheap confidence proxy: longer extractions tend to be richer matches.
+    let confidence = ((text.len() as f64) / 500.0).min(1.0);
+
+    Ok((format!("{}|{}", app_name, window_title), category, text, confidence))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -426,6 +513,24 @@ pub fn run() {
                 )
                 .execute(&pool)
                 .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS screen_captures (
+                        id TEXT PRIMARY KEY,
+                        captured_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        app_name TEXT NOT NULL DEFAULT '',
+                        window_title TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT 'general',
+                        text TEXT NOT NULL DEFAULT '',
+                        confidence REAL NOT NULL DEFAULT 0.0
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_screen_captures_time ON screen_captures(captured_at DESC);")
+                    .execute(&pool)
+                    .await?;
 
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_user ON user_preferences(user_id);")
                     .execute(&pool)
@@ -590,7 +695,11 @@ pub fn run() {
             }).map_err(|e| tauri::Error::Setup(Box::new(e)))?;
 
             // Store pool in State
-            app.manage(DbState { pool });
+            app.manage(DbState { pool: pool.clone() });
+
+            // Screen capture toggle (defaults off — privacy-first)
+            let capture_enabled = Arc::new(AtomicBool::new(false));
+            app.manage(CaptureState { enabled: capture_enabled.clone() });
 
             // Spawn active window focus monitor loop
             let app_handle = app.handle().clone();
@@ -602,6 +711,53 @@ pub fn run() {
                             app_name: active_window.app_name,
                             title: active_window.title,
                         });
+                    }
+                }
+            });
+
+            // Spawn screen capture + OCR loop on a dedicated OS thread.
+            // Both xcap and Windows.Media.Ocr are synchronous and may block, so
+            // we keep them off the tokio runtime to avoid stalling other tasks.
+            let capture_app_handle = app.handle().clone();
+            let capture_pool = pool;
+            let capture_flag = capture_enabled;
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    if !capture_flag.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    match capture_and_ocr_once() {
+                        Ok((app_title, category, text, confidence)) => {
+                            if text.trim().is_empty() {
+                                continue;
+                            }
+                            let mut parts = app_title.splitn(2, '|');
+                            let app_name = parts.next().unwrap_or("").to_string();
+                            let window_title = parts.next().unwrap_or("").to_string();
+                            let id = format!("cap_{}", date_timestamp_string());
+                            let pool = capture_pool.clone();
+                            let app_handle = capture_app_handle.clone();
+                            let category_clone = category.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = sqlx::query(
+                                    "INSERT INTO screen_captures (id, app_name, window_title, category, text, confidence) VALUES (?, ?, ?, ?, ?, ?)"
+                                )
+                                .bind(&id)
+                                .bind(&app_name)
+                                .bind(&window_title)
+                                .bind(&category_clone)
+                                .bind(&text)
+                                .bind(confidence)
+                                .execute(&pool)
+                                .await;
+                                let _ = app_handle.emit("screen-capture", &id);
+                            });
+                            let _ = category;
+                        }
+                        Err(e) => {
+                            eprintln!("[screen capture] {}", e);
+                        }
                     }
                 }
             });
@@ -626,7 +782,11 @@ pub fn run() {
             get_habits,
             create_habit,
             delete_habit,
-            toggle_habit_completion
+            toggle_habit_completion,
+            get_screen_captures,
+            clear_screen_captures,
+            set_screen_capture_enabled,
+            get_screen_capture_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

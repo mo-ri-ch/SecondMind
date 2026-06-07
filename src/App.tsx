@@ -1,6 +1,16 @@
 import { useState, useEffect } from "react";
 import { FloatingWidget } from "./components/FloatingWidget";
-import { Settings, ShieldAlert } from "lucide-react";
+import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw } from "lucide-react";
+
+interface ScreenCapture {
+  id: string;
+  captured_at: string;
+  app_name: string;
+  window_title: string;
+  category: string;
+  text: string;
+  confidence: number;
+}
 
 function App() {
   const [isTauri, setIsTauri] = useState(false);
@@ -8,6 +18,47 @@ function App() {
   const [username, setUsername] = useState("Alex");
   const [theme, setTheme] = useState("dark");
   const [proactivity, setProactivity] = useState(80);
+  const [captureEnabled, setCaptureEnabled] = useState(false);
+  const [captures, setCaptures] = useState<ScreenCapture[]>([]);
+  const [capturesLoading, setCapturesLoading] = useState(false);
+
+  const refreshCaptures = async () => {
+    if (!isTauri) return;
+    setCapturesLoading(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const enabled = await invoke<boolean>("get_screen_capture_enabled");
+      setCaptureEnabled(enabled);
+      const rows = await invoke<ScreenCapture[]>("get_screen_captures", { limit: 50 });
+      setCaptures(rows ?? []);
+    } catch (err) {
+      console.error("Failed to load screen captures:", err);
+    } finally {
+      setCapturesLoading(false);
+    }
+  };
+
+  const toggleCapture = async (next: boolean) => {
+    setCaptureEnabled(next);
+    if (!isTauri) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_screen_capture_enabled", { enabled: next });
+    } catch (err) {
+      console.error("Failed to toggle screen capture:", err);
+    }
+  };
+
+  const handleClearCaptures = async () => {
+    if (!isTauri) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("clear_screen_captures");
+      setCaptures([]);
+    } catch (err) {
+      console.error("Failed to clear screen captures:", err);
+    }
+  };
 
   useEffect(() => {
     const isTauriRuntime = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -56,6 +107,12 @@ function App() {
 
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (showSettings) {
+      refreshCaptures();
+    }
+  }, [showSettings]);
 
   const handleSaveSettings = async () => {
     if (isTauri) {
@@ -177,6 +234,74 @@ function App() {
                   <p className="text-[11px] text-slate-400 leading-normal">
                     Higher values allow Second Mind to alert you more frequently about focus lapses, healthy habit intervals, and learning checkpoints.
                   </p>
+                </div>
+              </div>
+
+              {/* Screen Log */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">Screen Log (Developer)</label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={refreshCaptures}
+                      disabled={!isTauri || capturesLoading}
+                      className="text-slate-400 hover:text-white transition-all text-[10px] font-medium px-2 py-1 rounded bg-white/[0.04] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <RefreshCw size={11} className={capturesLoading ? "animate-spin" : ""} />
+                      Refresh
+                    </button>
+                    <button
+                      onClick={handleClearCaptures}
+                      disabled={!isTauri || captures.length === 0}
+                      className="text-rose-300 hover:text-rose-200 transition-all text-[10px] font-medium px-2 py-1 rounded bg-rose-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <Trash2 size={11} />
+                      Clear
+                    </button>
+                  </div>
+                </div>
+
+                <div className="glass-card rounded-xl p-4 border border-white/5 space-y-3">
+                  <button
+                    onClick={() => toggleCapture(!captureEnabled)}
+                    disabled={!isTauri}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                      captureEnabled
+                        ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/30 hover:bg-emerald-500/25"
+                        : "bg-slate-800/40 text-slate-300 border border-white/5 hover:bg-slate-800/60"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      {captureEnabled ? <Eye size={14} /> : <EyeOff size={14} />}
+                      Screen capture {captureEnabled ? "active" : "paused"}
+                    </span>
+                    <span className="text-[10px] opacity-70">{captureEnabled ? "Capturing every 10s" : "Click to enable"}</span>
+                  </button>
+
+                  <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                    {captures.length === 0 && (
+                      <p className="text-[11px] text-slate-500 leading-normal text-center py-4">
+                        {captureEnabled
+                          ? "Waiting for first capture..."
+                          : "Enable screen capture to start logging OCR text from your active window."}
+                      </p>
+                    )}
+                    {captures.map(cap => (
+                      <div key={cap.id} className="rounded-lg bg-slate-950/40 border border-white/5 px-3 py-2 space-y-1">
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-violet-300 font-medium">{cap.app_name || "Unknown"}</span>
+                          <span className="text-slate-500">{cap.captured_at}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 uppercase tracking-wider">{cap.category}</span>
+                          <span className="text-slate-500 truncate">{cap.window_title}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-300 leading-snug whitespace-pre-wrap break-words line-clamp-3">
+                          {cap.text}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
 
