@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { FloatingWidget } from "./components/FloatingWidget";
-import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw } from "lucide-react";
+import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw, Sparkles, AlertTriangle, X as XIcon } from "lucide-react";
 
 interface ScreenCapture {
   id: string;
@@ -12,6 +12,14 @@ interface ScreenCapture {
   confidence: number;
 }
 
+interface PulseAlert {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  severity: "info" | "warning";
+}
+
 function App() {
   const [isTauri, setIsTauri] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -21,6 +29,19 @@ function App() {
   const [captureEnabled, setCaptureEnabled] = useState(false);
   const [captures, setCaptures] = useState<ScreenCapture[]>([]);
   const [capturesLoading, setCapturesLoading] = useState(false);
+  const [pulseAlerts, setPulseAlerts] = useState<PulseAlert[]>([]);
+
+  const pushPulseAlert = (alert: Omit<PulseAlert, "id">) => {
+    const id = `pulse_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setPulseAlerts(prev => [...prev, { ...alert, id }]);
+    setTimeout(() => {
+      setPulseAlerts(prev => prev.filter(a => a.id !== id));
+    }, 9000);
+  };
+
+  const dismissPulseAlert = (id: string) => {
+    setPulseAlerts(prev => prev.filter(a => a.id !== id));
+  };
 
   const refreshCaptures = async () => {
     if (!isTauri) return;
@@ -114,6 +135,51 @@ function App() {
     }
   }, [showSettings]);
 
+  useEffect(() => {
+    let active = true;
+    const unlisteners: Array<() => void> = [];
+
+    const setup = async () => {
+      const isTauriRuntime = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+      if (!isTauriRuntime) {
+        // Browser-mode demo: drop one alert ~6s after load so the toast UI is visible.
+        const t = setTimeout(() => {
+          pushPulseAlert({
+            kind: "coding-fatigue",
+            title: "Take a breath?",
+            body: "Sandbox demo: you've been writing code for a while. A two-minute stretch will reset your focus.",
+            severity: "warning",
+          });
+        }, 6000);
+        return () => clearTimeout(t);
+      }
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const ul = await listen<any>("pulse-alert", (event) => {
+          const p = event.payload;
+          if (p?.title && p?.body) {
+            pushPulseAlert({
+              kind: p.kind ?? "general",
+              title: p.title,
+              body: p.body,
+              severity: p.severity === "warning" ? "warning" : "info",
+            });
+          }
+        });
+        if (!active) ul(); else unlisteners.push(ul);
+      } catch (err) {
+        console.error("Failed to attach pulse-alert listener:", err);
+      }
+    };
+
+    const cleanupPromise = setup();
+    return () => {
+      active = false;
+      unlisteners.forEach(u => u());
+      Promise.resolve(cleanupPromise).then(fn => { if (typeof fn === "function") fn(); });
+    };
+  }, []);
+
   const handleSaveSettings = async () => {
     if (isTauri) {
       try {
@@ -166,6 +232,35 @@ function App() {
       {/* 2. Floating Widget Component Container */}
       <div className="absolute bottom-8 right-8 z-40">
         <FloatingWidget username={username} onOpenSettings={() => setShowSettings(true)} />
+      </div>
+
+      {/* Phase 8 pulse alert toasts */}
+      <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
+        {pulseAlerts.map(a => (
+          <div
+            key={a.id}
+            className={`pointer-events-auto glass-panel border rounded-2xl px-4 py-3 shadow-2xl flex items-start gap-3 animate-glow-pulse ${
+              a.severity === "warning"
+                ? "border-amber-500/30 bg-amber-500/5"
+                : "border-violet-500/30 bg-violet-500/5"
+            }`}
+          >
+            <div className={`shrink-0 mt-0.5 ${a.severity === "warning" ? "text-amber-300" : "text-violet-300"}`}>
+              {a.severity === "warning" ? <AlertTriangle size={16} /> : <Sparkles size={16} />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-white">{a.title}</div>
+              <p className="text-[11px] text-slate-300 leading-snug mt-0.5">{a.body}</p>
+            </div>
+            <button
+              onClick={() => dismissPulseAlert(a.id)}
+              className="shrink-0 text-slate-400 hover:text-white transition-colors p-0.5 cursor-pointer bg-transparent border-none"
+              title="Dismiss"
+            >
+              <XIcon size={13} />
+            </button>
+          </div>
+        ))}
       </div>
 
       {/* 3. Settings/Dashboard Panel Modal */}

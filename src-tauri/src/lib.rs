@@ -1,4 +1,5 @@
 mod ocr;
+mod cognition;
 
 use tauri::Manager;
 use tauri::Emitter;
@@ -788,16 +789,24 @@ pub fn run() {
             let capture_enabled = Arc::new(AtomicBool::new(false));
             app.manage(CaptureState { enabled: capture_enabled.clone() });
 
-            // Spawn active window focus monitor loop
+            // Spawn active window focus monitor loop + cognitive state engine
             let app_handle = app.handle().clone();
+            let cognition = std::sync::Arc::new(cognition::CognitionEngine::new());
+            let cognition_loop = cognition.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     if let Ok(active_window) = active_win_pos_rs::get_active_window() {
+                        let category = ocr::categorize_activity(&active_window.app_name, "");
                         let _ = app_handle.emit("active-window", ActiveWindowPayload {
                             app_name: active_window.app_name,
                             title: active_window.title,
                         });
+                        let (snapshot, alert) = cognition_loop.observe(category);
+                        let _ = app_handle.emit("cognitive-state", &snapshot);
+                        if let Some(pulse) = alert {
+                            let _ = app_handle.emit("pulse-alert", &pulse);
+                        }
                     }
                 }
             });
