@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { FloatingWidget } from "./components/FloatingWidget";
 import { PeoplePanel } from "./components/PeoplePanel";
-import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw, Sparkles, AlertTriangle, X as XIcon } from "lucide-react";
+import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw, Sparkles, AlertTriangle, X as XIcon, Download, Lock } from "lucide-react";
 
 interface ScreenCapture {
   id: string;
@@ -31,6 +31,56 @@ function App() {
   const [captures, setCaptures] = useState<ScreenCapture[]>([]);
   const [capturesLoading, setCapturesLoading] = useState(false);
   const [pulseAlerts, setPulseAlerts] = useState<PulseAlert[]>([]);
+  const [retentionDays, setRetentionDays] = useState(30);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [privacyStatus, setPrivacyStatus] = useState("");
+
+  const handlePurge = async () => {
+    if (!isTauri) { setPrivacyStatus("Browser sandbox: nothing to purge."); return; }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const removed = await invoke<number>("purge_old_data", { keepDays: retentionDays });
+      setPrivacyStatus(`Removed ${removed} captures older than ${retentionDays} days.`);
+      await refreshCaptures();
+    } catch (err) {
+      console.error(err);
+      setPrivacyStatus("Purge failed - see console.");
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!confirmClear) { setConfirmClear(true); return; }
+    if (!isTauri) { setPrivacyStatus("Browser sandbox: nothing to clear."); setConfirmClear(false); return; }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("clear_all_user_data");
+      setPrivacyStatus("All user data cleared.");
+      await refreshCaptures();
+    } catch (err) {
+      console.error(err);
+      setPrivacyStatus("Clear failed - see console.");
+    }
+    setConfirmClear(false);
+  };
+
+  const handleExport = async () => {
+    if (!isTauri) { setPrivacyStatus("Browser sandbox: open in Tauri to export."); return; }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const json = await invoke<string>("export_all_data");
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `second_mind_export_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setPrivacyStatus("Export downloaded.");
+    } catch (err) {
+      console.error(err);
+      setPrivacyStatus("Export failed - see console.");
+    }
+  };
 
   const pushPulseAlert = (alert: Omit<PulseAlert, "id">) => {
     const id = `pulse_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -400,6 +450,64 @@ function App() {
                       </div>
                     ))}
                   </div>
+                </div>
+              </div>
+
+              {/* Privacy & Security */}
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <Lock size={13} /> Privacy & Security
+                </label>
+                <div className="glass-card rounded-xl p-4 border border-white/5 space-y-4">
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-300">Memory retention</span>
+                      <span className="text-violet-400 font-bold">{retentionDays}d</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={365}
+                      value={retentionDays}
+                      onChange={e => setRetentionDays(parseInt(e.target.value))}
+                      className="w-full accent-violet-500 h-1 bg-slate-800 rounded-lg cursor-pointer"
+                    />
+                    <button
+                      onClick={handlePurge}
+                      className="w-full bg-slate-800/60 hover:bg-slate-800/80 text-slate-200 text-xs py-2 rounded-lg cursor-pointer border border-white/5 transition-all"
+                    >
+                      Purge captures older than {retentionDays} days
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handleExport}
+                      className="bg-violet-600/20 hover:bg-violet-600/30 text-violet-200 text-xs py-2 rounded-lg cursor-pointer border border-violet-500/20 transition-all flex items-center justify-center gap-1.5"
+                    >
+                      <Download size={12} /> Export JSON
+                    </button>
+                    <button
+                      onClick={handleClearAll}
+                      className={`text-xs py-2 rounded-lg cursor-pointer border transition-all flex items-center justify-center gap-1.5 ${
+                        confirmClear
+                          ? "bg-rose-500/30 hover:bg-rose-500/40 text-rose-100 border-rose-500/40"
+                          : "bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 border-rose-500/20"
+                      }`}
+                    >
+                      <Trash2 size={12} /> {confirmClear ? "Confirm clear?" : "Clear all data"}
+                    </button>
+                  </div>
+
+                  {privacyStatus && (
+                    <div className="text-[10px] text-slate-300 italic bg-slate-950/40 rounded px-3 py-2 border border-white/5">
+                      {privacyStatus}
+                    </div>
+                  )}
+
+                  <p className="text-[10px] text-slate-500 leading-snug">
+                    Database encryption (SQLCipher) is gated for a future build. All data already lives only on this device in AppData.
+                  </p>
                 </div>
               </div>
 

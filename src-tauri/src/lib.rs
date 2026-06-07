@@ -564,6 +564,104 @@ async fn teacher_explain(
 }
 
 #[tauri::command]
+async fn purge_old_data(
+    keep_days: i64,
+    state: tauri::State<'_, DbState>,
+) -> Result<i64, String> {
+    let keep = keep_days.max(1);
+    let cutoff = format!("-{} days", keep);
+    let result = sqlx::query("DELETE FROM screen_captures WHERE captured_at < datetime('now', ?)")
+        .bind(cutoff)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() as i64)
+}
+
+#[tauri::command]
+async fn clear_all_user_data(state: tauri::State<'_, DbState>) -> Result<(), String> {
+    // Reset tables but keep the user row so the app stays usable.
+    let tables = [
+        "screen_captures",
+        "habit_completions",
+        "habits",
+        "goals",
+        "learn_topics",
+        "commitments",
+        "contacts",
+        "daily_reflections",
+    ];
+    for t in tables {
+        sqlx::query(&format!("DELETE FROM {}", t))
+            .execute(&state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_all_data(state: tauri::State<'_, DbState>) -> Result<String, String> {
+    let users: Vec<User> = sqlx::query_as("SELECT id, name, timezone, language FROM users")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let prefs: Vec<Preference> = sqlx::query_as("SELECT category, key, value FROM user_preferences")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let goals: Vec<DbGoal> = sqlx::query_as(
+        "SELECT id, title, why_it_matters, type as goal_type, progress_percent, target_date, status FROM goals",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let habits: Vec<DbHabit> = sqlx::query_as(
+        "SELECT h.id, h.name, 0 as completed FROM habits h",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let captures: Vec<DbScreenCapture> = sqlx::query_as(
+        "SELECT id, captured_at, app_name, window_title, category, text, confidence FROM screen_captures ORDER BY captured_at DESC LIMIT 5000",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let contacts: Vec<DbContact> = sqlx::query_as(
+        "SELECT id, name, relationship, cadence_days, last_interaction_at, notes, created_at FROM contacts",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let commitments: Vec<DbCommitment> = sqlx::query_as(
+        "SELECT id, contact_id, description, due_date, status, created_at FROM commitments",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let reflections: Vec<DbReflection> = sqlx::query_as(
+        "SELECT date, journal_wins, journal_drag, journal_tomorrow, narrative FROM daily_reflections ORDER BY date DESC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let bundle = serde_json::json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "users": users,
+        "preferences": prefs,
+        "goals": goals,
+        "habits": habits,
+        "screen_captures": captures,
+        "contacts": contacts,
+        "commitments": commitments,
+        "reflections": reflections,
+    });
+    serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_knowledge_graph(state: tauri::State<'_, DbState>) -> Result<KnowledgeGraph, String> {
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
@@ -1439,7 +1537,10 @@ pub fn run() {
             resolve_commitment,
             get_daily_summary,
             save_daily_reflection,
-            get_knowledge_graph
+            get_knowledge_graph,
+            purge_old_data,
+            clear_all_user_data,
+            export_all_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
