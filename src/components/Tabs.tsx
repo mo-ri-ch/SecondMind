@@ -172,10 +172,9 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
     // The seconds-of-audio acts as a stand-in so the chat flow stays testable.
     const seconds = Math.max(1, Math.round(durationMs / 1000));
     const transcript = `[voice ${seconds}s] Tell me about my last focus session.`;
-    setInputVal(transcript);
-    // Auto-send the transcript via the existing chat pipeline.
-    const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
-    setTimeout(() => handleSend(fakeEvent), 50);
+    // Send directly with the transcript - avoids the React state-flush race
+    // that would otherwise make handleSend read a stale inputVal.
+    sendChatMessage(transcript);
   };
 
   // Phase 9: learn tab state
@@ -508,18 +507,16 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
     setSearchLoading(false);
   };
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputVal.trim() || isThinking || isStreaming) return;
+  const sendChatMessage = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || isThinking || isStreaming) return;
 
-    const userMessage = { id: `user_${Date.now()}`, sender: "user", text: inputVal };
+    const userMessage = { id: `user_${Date.now()}`, sender: "user", text: trimmed };
     const aiMessageId = `ai_${Date.now()}`;
     const aiMessage = { id: aiMessageId, sender: "ai", text: "" };
 
     setMessages((prev) => [...prev, userMessage, aiMessage]);
     activeAiMessageIdRef.current = aiMessageId;
-
-    const currentVal = inputVal;
     setInputVal("");
 
     const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -527,14 +524,19 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
     if (isTauri) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("start_chat_stream", { prompt: currentVal });
+        await invoke("start_chat_stream", { prompt: trimmed });
       } catch (err) {
         console.error("Failed to invoke start_chat_stream:", err);
-        simulateBrowserStream(currentVal, aiMessageId);
+        simulateBrowserStream(trimmed, aiMessageId);
       }
     } else {
-      simulateBrowserStream(currentVal, aiMessageId);
+      simulateBrowserStream(trimmed, aiMessageId);
     }
+  };
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    sendChatMessage(inputVal);
   };
 
   // Add / Delete Goals
