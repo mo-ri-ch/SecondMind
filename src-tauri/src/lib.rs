@@ -397,6 +397,27 @@ fn normalize_fts_query(raw: &str) -> String {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbContact {
+    pub id: String,
+    pub name: String,
+    pub relationship: String,
+    pub cadence_days: i64,
+    pub last_interaction_at: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbCommitment {
+    pub id: String,
+    pub contact_id: String,
+    pub description: String,
+    pub due_date: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct DbLearnTopic {
     pub id: String,
     pub created_at: String,
@@ -500,6 +521,103 @@ async fn teacher_explain(
     .await
     .map_err(|e| e.to_string())?;
     Ok(topic)
+}
+
+#[tauri::command]
+async fn get_contacts(state: tauri::State<'_, DbState>) -> Result<Vec<DbContact>, String> {
+    sqlx::query_as::<_, DbContact>(
+        "SELECT id, name, relationship, cadence_days, last_interaction_at, notes, created_at FROM contacts ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_contact(
+    id: String,
+    name: String,
+    relationship: String,
+    cadence_days: i64,
+    notes: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    let user = sqlx::query_as::<_, User>("SELECT id, name, timezone, language FROM users LIMIT 1")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO contacts (id, user_id, name, relationship, cadence_days, notes) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(user.id)
+    .bind(name)
+    .bind(relationship)
+    .bind(cadence_days)
+    .bind(notes)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_contact(id: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("DELETE FROM contacts WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn touch_contact(id: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("UPDATE contacts SET last_interaction_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_commitments(state: tauri::State<'_, DbState>) -> Result<Vec<DbCommitment>, String> {
+    sqlx::query_as::<_, DbCommitment>(
+        "SELECT id, contact_id, description, due_date, status, created_at FROM commitments ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_commitment(
+    id: String,
+    contact_id: String,
+    description: String,
+    due_date: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    sqlx::query("INSERT INTO commitments (id, contact_id, description, due_date) VALUES (?, ?, ?, ?)")
+        .bind(id)
+        .bind(contact_id)
+        .bind(description)
+        .bind(due_date)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resolve_commitment(id: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    sqlx::query("UPDATE commitments SET status = 'resolved' WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -767,6 +885,39 @@ pub fn run() {
                 .execute(&pool)
                 .await?;
 
+                // Phase 10 - people directory + commitments
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS contacts (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        relationship TEXT NOT NULL DEFAULT 'friend',
+                        cadence_days INTEGER NOT NULL DEFAULT 14,
+                        last_interaction_at DATETIME,
+                        notes TEXT,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS commitments (
+                        id TEXT PRIMARY KEY,
+                        contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+                        description TEXT NOT NULL,
+                        due_date TEXT,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_commitments_contact ON commitments(contact_id);")
+                    .execute(&pool)
+                    .await?;
+
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_user ON user_preferences(user_id);")
                     .execute(&pool)
                     .await?;
@@ -1033,7 +1184,14 @@ pub fn run() {
             search_history,
             teacher_explain,
             get_learn_topics,
-            rate_learn_topic
+            rate_learn_topic,
+            get_contacts,
+            create_contact,
+            delete_contact,
+            touch_contact,
+            get_commitments,
+            create_commitment,
+            resolve_commitment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

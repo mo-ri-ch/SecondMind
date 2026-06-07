@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { FloatingWidget } from "./components/FloatingWidget";
+import { PeoplePanel } from "./components/PeoplePanel";
 import { Settings, ShieldAlert, Eye, EyeOff, Trash2, RefreshCw, Sparkles, AlertTriangle, X as XIcon } from "lucide-react";
 
 interface ScreenCapture {
@@ -331,6 +332,8 @@ function App() {
                   </p>
                 </div>
               </div>
+
+              <PeoplePanel />
 
               {/* Screen Log */}
               <div className="space-y-3">
