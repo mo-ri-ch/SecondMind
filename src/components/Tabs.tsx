@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X } from "lucide-react";
+import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X, Search, Clock } from "lucide-react";
 
 interface TabsProps {
   username?: string;
@@ -29,6 +29,16 @@ interface CelebrationParticle {
   offsetX: number;
   offsetY: number;
   color: string;
+}
+
+interface HistorySearchResult {
+  id: string;
+  captured_at: string;
+  app_name: string;
+  window_title: string;
+  category: string;
+  text: string;
+  snippet: string;
 }
 
 export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabChange }) => {
@@ -77,6 +87,13 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
 
   // Particle celebration state
   const [particles, setParticles] = useState<CelebrationParticle[]>([]);
+
+  // Phase 7: history search state
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<HistorySearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchAttempted, setSearchAttempted] = useState(false);
 
   const activeAiMessageIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -304,6 +321,40 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
     }, 600);
   };
 
+  const handleSearchHistory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = searchQuery.trim();
+    if (!q) return;
+    setSearchAttempted(true);
+    setSearchLoading(true);
+    const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+    if (isTauri) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const rows = await invoke<HistorySearchResult[]>("search_history", { query: q, limit: 20 });
+        setSearchResults(rows ?? []);
+      } catch (err) {
+        console.error("Failed to search history:", err);
+        setSearchResults([]);
+      }
+    } else {
+      // Browser sandbox: mock a small set so the UI is testable.
+      const mock: HistorySearchResult[] = [
+        {
+          id: "mock_1",
+          captured_at: new Date().toISOString(),
+          app_name: "Google Chrome",
+          window_title: "Searched mock result",
+          category: "browsing",
+          text: `Sample OCR content matching "${q}". In the Tauri build this returns real captures.`,
+          snippet: `Sample OCR content matching [${q}]...`,
+        },
+      ];
+      setSearchResults(mock);
+    }
+    setSearchLoading(false);
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputVal.trim() || isThinking || isStreaming) return;
@@ -509,6 +560,44 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {activeTab === "chat" && (
           <div className="space-y-4 flex flex-col justify-end min-h-full">
+            {/* Phase 7 search results panel */}
+            {searchMode && searchAttempted && (
+              <div className="glass-card rounded-xl border border-violet-500/15 p-3 space-y-2 max-h-56 overflow-y-auto">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-slate-400">
+                  <span>History Matches</span>
+                  <span>{searchResults.length} result{searchResults.length === 1 ? "" : "s"}</span>
+                </div>
+                {searchLoading && (
+                  <div className="text-[11px] text-slate-400 italic">Searching captures...</div>
+                )}
+                {!searchLoading && searchResults.length === 0 && (
+                  <div className="text-[11px] text-slate-500 italic">
+                    No captures matched. Enable Screen Log in Settings to start indexing what you read.
+                  </div>
+                )}
+                {!searchLoading && searchResults.map(r => (
+                  <div key={r.id} className="rounded-lg bg-slate-950/40 border border-white/5 px-3 py-2 space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-violet-300 font-medium truncate">{r.app_name || "Unknown"}</span>
+                      <span className="text-slate-500 flex items-center gap-1"><Clock size={9} />{r.captured_at}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate" title={r.window_title}>{r.window_title}</div>
+                    <p
+                      className="text-[11px] text-slate-300 leading-snug whitespace-pre-wrap break-words line-clamp-3"
+                      dangerouslySetInnerHTML={{
+                        __html: r.snippet
+                          .replace(/&/g, "&amp;")
+                          .replace(/</g, "&lt;")
+                          .replace(/>/g, "&gt;")
+                          .replace(/\[/g, "<mark class=\"bg-violet-500/30 text-violet-100 rounded px-0.5\">")
+                          .replace(/\]/g, "</mark>"),
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="space-y-3">
               {messages.map((m) => {
                 const isStreamingThis = isStreaming && activeAiMessageIdRef.current === m.id;
@@ -552,22 +641,64 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
               )}
             </div>
             
-            {/* Input bar */}
-            <form onSubmit={handleSend} className="relative mt-2">
-              <input 
-                type="text"
-                value={inputVal}
-                onChange={e => setInputVal(e.target.value)}
-                placeholder="Ask Second Mind..."
-                className="w-full bg-slate-950/40 border border-white/5 rounded-xl py-3 pl-4 pr-10 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 text-white placeholder-slate-400 transition-all"
-              />
-              <button 
-                type="submit"
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
-              >
-                <Send size={18} />
-              </button>
-            </form>
+            {/* Input bar (chat or search) */}
+            {searchMode ? (
+              <form onSubmit={handleSearchHistory} className="relative mt-2">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-violet-300/70 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="Search my history..."
+                  autoFocus
+                  className="w-full bg-slate-950/40 border border-violet-500/30 rounded-xl py-3 pl-9 pr-20 text-sm focus:outline-none focus:border-violet-500/60 focus:ring-1 focus:ring-violet-500/30 text-white placeholder-violet-300/40 transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchMode(false);
+                    setSearchQuery("");
+                    setSearchResults([]);
+                    setSearchAttempted(false);
+                  }}
+                  className="absolute right-10 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-[10px] cursor-pointer bg-transparent border-none px-1"
+                  title="Back to chat"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
+                  title="Search"
+                >
+                  <Search size={18} />
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleSend} className="relative mt-2">
+                <input
+                  type="text"
+                  value={inputVal}
+                  onChange={e => setInputVal(e.target.value)}
+                  placeholder="Ask Second Mind..."
+                  className="w-full bg-slate-950/40 border border-white/5 rounded-xl py-3 pl-4 pr-20 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 text-white placeholder-slate-400 transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => setSearchMode(true)}
+                  className="absolute right-10 top-1/2 -translate-y-1/2 text-slate-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
+                  title="Search my history"
+                >
+                  <Search size={16} />
+                </button>
+                <button
+                  type="submit"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
+                >
+                  <Send size={18} />
+                </button>
+              </form>
+            )}
           </div>
         )}
 

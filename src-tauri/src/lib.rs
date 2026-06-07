@@ -60,6 +60,17 @@ pub struct DbScreenCapture {
     pub confidence: f64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct SearchResult {
+    pub id: String,
+    pub captured_at: String,
+    pub app_name: String,
+    pub window_title: String,
+    pub category: String,
+    pub text: String,
+    pub snippet: String,
+}
+
 #[derive(Clone, serde::Serialize)]
 struct ChatStatusPayload {
     status: String,
@@ -373,6 +384,46 @@ fn get_screen_capture_enabled(capture_state: tauri::State<'_, CaptureState>) -> 
     capture_state.enabled.load(Ordering::SeqCst)
 }
 
+// Build a safe FTS5 query from arbitrary user input: keep only alphanumerics
+// (per whitespace-separated token) and append `*` for prefix matching.
+fn normalize_fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("{}*", w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[tauri::command]
+async fn search_history(
+    query: String,
+    limit: Option<i64>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<SearchResult>, String> {
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let fts_query = normalize_fts_query(&query);
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query_as::<_, SearchResult>(
+        "SELECT sc.id, sc.captured_at, sc.app_name, sc.window_title, sc.category, sc.text,
+                snippet(screen_captures_fts, 1, '[', ']', '...', 12) as snippet
+         FROM screen_captures_fts
+         JOIN screen_captures sc ON sc.id = screen_captures_fts.capture_id
+         WHERE screen_captures_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?",
+    )
+    .bind(fts_query)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 fn capture_and_ocr_once() -> Result<(String, String, String, f64), String> {
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     let primary = monitors
@@ -531,6 +582,42 @@ pub fn run() {
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_screen_captures_time ON screen_captures(captured_at DESC);")
                     .execute(&pool)
                     .await?;
+
+                // Phase 7 - FTS5 virtual table over OCR text, kept in sync via triggers.
+                sqlx::query(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS screen_captures_fts USING fts5(
+                        capture_id UNINDEXED,
+                        text,
+                        tokenize='porter unicode61'
+                    );"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TRIGGER IF NOT EXISTS screen_captures_ai AFTER INSERT ON screen_captures BEGIN
+                        INSERT INTO screen_captures_fts(capture_id, text) VALUES (new.id, new.text);
+                    END;"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TRIGGER IF NOT EXISTS screen_captures_ad AFTER DELETE ON screen_captures BEGIN
+                        DELETE FROM screen_captures_fts WHERE capture_id = old.id;
+                    END;"
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    "CREATE TRIGGER IF NOT EXISTS screen_captures_au AFTER UPDATE ON screen_captures BEGIN
+                        DELETE FROM screen_captures_fts WHERE capture_id = old.id;
+                        INSERT INTO screen_captures_fts(capture_id, text) VALUES (new.id, new.text);
+                    END;"
+                )
+                .execute(&pool)
+                .await?;
 
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_preferences_user ON user_preferences(user_id);")
                     .execute(&pool)
@@ -786,7 +873,8 @@ pub fn run() {
             get_screen_captures,
             clear_screen_captures,
             set_screen_capture_enabled,
-            get_screen_capture_enabled
+            get_screen_capture_enabled,
+            search_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
