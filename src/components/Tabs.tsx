@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X, Search, Clock, GraduationCap, Sparkles as SparkleIcon } from "lucide-react";
+import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X, Search, Clock, GraduationCap, Sparkles as SparkleIcon, Mic, Volume2 } from "lucide-react";
 
 interface TabsProps {
   username?: string;
@@ -95,6 +95,88 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
   const [searchResults, setSearchResults] = useState<HistorySearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchAttempted, setSearchAttempted] = useState(false);
+
+  // Phase 12: voice state
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceLevel, setVoiceLevel] = useState<number[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const recordingStartedAtRef = useRef<number>(0);
+  const animationFrameRef = useRef<number | null>(null);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+
+  const stopVisualizer = () => {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+  };
+
+  const tickVisualizer = () => {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    const sample: number[] = [];
+    const step = Math.max(1, Math.floor(data.length / 14));
+    for (let i = 0; i < 14; i++) {
+      sample.push(data[i * step] / 255);
+    }
+    setVoiceLevel(sample);
+    animationFrameRef.current = requestAnimationFrame(tickVisualizer);
+  };
+
+  const startVoice = async () => {
+    if (isRecording) return;
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      recordingStartedAtRef.current = Date.now();
+      setIsRecording(true);
+      tickVisualizer();
+    } catch (err) {
+      console.error("Voice capture failed:", err);
+    }
+  };
+
+  const stopVoice = async () => {
+    if (!isRecording) return;
+    setIsRecording(false);
+    stopVisualizer();
+    const durationMs = Date.now() - recordingStartedAtRef.current;
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    audioStreamRef.current?.getTracks().forEach(t => t.stop());
+    audioStreamRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+    setVoiceLevel([]);
+
+    // STT swap-point: real Whisper transcription replaces this mock.
+    // The seconds-of-audio acts as a stand-in so the chat flow stays testable.
+    const seconds = Math.max(1, Math.round(durationMs / 1000));
+    const transcript = `[voice ${seconds}s] Tell me about my last focus session.`;
+    setInputVal(transcript);
+    // Auto-send the transcript via the existing chat pipeline.
+    const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+    setTimeout(() => handleSend(fakeEvent), 50);
+  };
 
   // Phase 9: learn tab state
   const [learnLevel, setLearnLevel] = useState<"beginner" | "advanced">("beginner");
@@ -342,6 +424,24 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
       scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
   }, [messages, isThinking, isStreaming]);
+
+  // Phase 12: speak the most recent finished AI message via SpeechSynthesis.
+  // TTS swap-point: replace this with Kokoro-82M output later by piping the
+  // same text through a Tauri command and playing the returned audio buffer.
+  useEffect(() => {
+    if (!ttsEnabled || isStreaming || isThinking) return;
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const lastAi = [...messages].reverse().find(m => m.sender === "ai" && m.text);
+    if (!lastAi) return;
+    const speakKey = `${lastAi.id}::${lastAi.text.length}`;
+    if ((window as any).__sm_last_spoken === speakKey) return;
+    (window as any).__sm_last_spoken = speakKey;
+    const utter = new SpeechSynthesisUtterance(lastAi.text.replace(/```[\s\S]*?```/g, "code block"));
+    utter.rate = 1.05;
+    utter.pitch = 1.0;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  }, [messages, isThinking, isStreaming, ttsEnabled]);
 
   // Stream simulation fallback
   const simulateBrowserStream = (prompt: string, aiMessageId: string) => {
@@ -728,29 +828,66 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
                 </button>
               </form>
             ) : (
-              <form onSubmit={handleSend} className="relative mt-2">
-                <input
-                  type="text"
-                  value={inputVal}
-                  onChange={e => setInputVal(e.target.value)}
-                  placeholder="Ask Second Mind..."
-                  className="w-full bg-slate-950/40 border border-white/5 rounded-xl py-3 pl-4 pr-20 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 text-white placeholder-slate-400 transition-all"
-                />
-                <button
-                  type="button"
-                  onClick={() => setSearchMode(true)}
-                  className="absolute right-10 top-1/2 -translate-y-1/2 text-slate-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
-                  title="Search my history"
-                >
-                  <Search size={16} />
-                </button>
-                <button
-                  type="submit"
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
-                >
-                  <Send size={18} />
-                </button>
-              </form>
+              <div className="space-y-2 mt-2">
+                {isRecording && (
+                  <div className="glass-card rounded-xl border border-rose-500/30 bg-rose-500/5 px-3 py-2 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
+                    <span className="text-[10px] text-rose-200">Recording... release to transcribe</span>
+                    <div className="flex-1 flex items-end justify-end gap-0.5 h-5">
+                      {voiceLevel.map((v, i) => (
+                        <span
+                          key={i}
+                          className="w-0.5 rounded-full bg-rose-300"
+                          style={{ height: `${Math.max(15, v * 100)}%` }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <form onSubmit={handleSend} className="relative">
+                  <input
+                    type="text"
+                    value={inputVal}
+                    onChange={e => setInputVal(e.target.value)}
+                    placeholder="Ask Second Mind..."
+                    className="w-full bg-slate-950/40 border border-white/5 rounded-xl py-3 pl-4 pr-32 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 text-white placeholder-slate-400 transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setTtsEnabled(t => !t)}
+                    className={`absolute right-24 top-1/2 -translate-y-1/2 active:scale-95 transition-all cursor-pointer bg-transparent border-none ${ttsEnabled ? "text-violet-300" : "text-slate-500"}`}
+                    title={ttsEnabled ? "Voice replies on" : "Voice replies off"}
+                  >
+                    <Volume2 size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    onMouseDown={startVoice}
+                    onMouseUp={stopVoice}
+                    onMouseLeave={() => { if (isRecording) stopVoice(); }}
+                    onTouchStart={startVoice}
+                    onTouchEnd={stopVoice}
+                    className={`absolute right-16 top-1/2 -translate-y-1/2 active:scale-95 transition-all cursor-pointer bg-transparent border-none ${isRecording ? "text-rose-400" : "text-slate-400 hover:text-violet-300"}`}
+                    title="Hold to speak"
+                  >
+                    <Mic size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSearchMode(true)}
+                    className="absolute right-10 top-1/2 -translate-y-1/2 text-slate-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
+                    title="Search my history"
+                  >
+                    <Search size={16} />
+                  </button>
+                  <button
+                    type="submit"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 hover:text-violet-300 active:scale-95 transition-all cursor-pointer bg-transparent border-none"
+                  >
+                    <Send size={18} />
+                  </button>
+                </form>
+              </div>
             )}
           </div>
         )}
