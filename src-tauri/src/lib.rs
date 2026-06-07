@@ -396,6 +396,26 @@ fn normalize_fts_query(raw: &str) -> String {
         .join(" ")
 }
 
+#[derive(serde::Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub label: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct KnowledgeGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct DbReflection {
     pub date: String,
@@ -541,6 +561,88 @@ async fn teacher_explain(
     .await
     .map_err(|e| e.to_string())?;
     Ok(topic)
+}
+
+#[tauri::command]
+async fn get_knowledge_graph(state: tauri::State<'_, DbState>) -> Result<KnowledgeGraph, String> {
+    let mut nodes: Vec<GraphNode> = Vec::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    let goals: Vec<(String, String)> = sqlx::query_as("SELECT id, title FROM goals")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (id, title) in &goals {
+        nodes.push(GraphNode {
+            id: format!("goal:{}", id),
+            label: title.clone(),
+            kind: "goal".to_string(),
+        });
+    }
+
+    let habits: Vec<(String, String)> = sqlx::query_as("SELECT id, name FROM habits")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (id, name) in &habits {
+        nodes.push(GraphNode {
+            id: format!("habit:{}", id),
+            label: name.clone(),
+            kind: "habit".to_string(),
+        });
+    }
+
+    let contacts: Vec<(String, String)> = sqlx::query_as("SELECT id, name FROM contacts")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (id, name) in &contacts {
+        nodes.push(GraphNode {
+            id: format!("person:{}", id),
+            label: name.clone(),
+            kind: "person".to_string(),
+        });
+    }
+
+    let commitments: Vec<(String, String, String, String)> =
+        sqlx::query_as("SELECT id, contact_id, description, status FROM commitments")
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    for (id, contact_id, desc, status) in &commitments {
+        if status == "resolved" {
+            continue;
+        }
+        let node_id = format!("commitment:{}", id);
+        nodes.push(GraphNode {
+            id: node_id.clone(),
+            label: desc.clone(),
+            kind: "commitment".to_string(),
+        });
+        edges.push(GraphEdge {
+            from: format!("person:{}", contact_id),
+            to: node_id,
+            label: "owes".to_string(),
+        });
+
+        // Heuristic concept-linking: if commitment description mentions a
+        // goal title, draw an edge from person to that goal as well.
+        let lower_desc = desc.to_lowercase();
+        for (gid, gtitle) in &goals {
+            for word in gtitle.split_whitespace().filter(|w| w.len() > 4) {
+                if lower_desc.contains(&word.to_lowercase()) {
+                    edges.push(GraphEdge {
+                        from: format!("person:{}", contact_id),
+                        to: format!("goal:{}", gid),
+                        label: "supports".to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(KnowledgeGraph { nodes, edges })
 }
 
 #[tauri::command]
@@ -1336,7 +1438,8 @@ pub fn run() {
             create_commitment,
             resolve_commitment,
             get_daily_summary,
-            save_daily_reflection
+            save_daily_reflection,
+            get_knowledge_graph
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

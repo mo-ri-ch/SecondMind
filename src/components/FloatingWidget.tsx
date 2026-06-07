@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import { Avatar, AvatarState } from "./Avatar";
 import { Tabs } from "./Tabs";
 import { ReflectionPanel } from "./ReflectionPanel";
-import { X, Settings, BookOpen } from "lucide-react";
+import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
+import { X, Settings, BookOpen, Network } from "lucide-react";
 
 interface FloatingWidgetProps {
   username?: string;
@@ -15,6 +16,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
   const [avatarState, setAvatarState] = useState<AvatarState>("idle");
   const [cognitiveMessage, setCognitiveMessage] = useState<string>("");
   const [showReflection, setShowReflection] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -115,6 +117,13 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
                 <BookOpen size={15} />
               </button>
               <button
+                onClick={() => setShowGraph(true)}
+                title="Knowledge Map"
+                className="p-1 hover:text-white rounded hover:bg-white/[0.04] active:scale-95 transition-all cursor-pointer"
+              >
+                <Network size={15} />
+              </button>
+              <button
                 onClick={onOpenSettings}
                 title="Settings Dashboard"
                 className="p-1 hover:text-white rounded hover:bg-white/[0.04] active:scale-95 transition-all cursor-pointer"
@@ -136,6 +145,7 @@ export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex
       )}
 
       <ReflectionPanel open={showReflection} onClose={() => setShowReflection(false)} />
+      <KnowledgeGraphPanel open={showGraph} onClose={() => setShowGraph(false)} />
     </div>
   );
 };
