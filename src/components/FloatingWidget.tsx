@@ -10,7 +10,7 @@ interface FloatingWidgetProps {
 
 export const FloatingWidget: React.FC<FloatingWidgetProps> = ({ username = "Alex", onOpenSettings }) => {
   const [mode, setMode] = useState<"minimal" | "expanded">("minimal");
-  const [activeTab, setActiveTab] = useState<"chat" | "context" | "goals" | "habits">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "context" | "goals" | "habits" | "learn">("chat");
   const [avatarState, setAvatarState] = useState<AvatarState>("idle");
   const [cognitiveMessage, setCognitiveMessage] = useState<string>("");
 

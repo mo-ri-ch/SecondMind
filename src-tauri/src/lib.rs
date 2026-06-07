@@ -396,6 +396,138 @@ fn normalize_fts_query(raw: &str) -> String {
         .join(" ")
 }
 
+#[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct DbLearnTopic {
+    pub id: String,
+    pub created_at: String,
+    pub source_context: String,
+    pub title: String,
+    pub level: String,
+    pub flashcards_json: String,
+    pub comprehension_score: f64,
+}
+
+#[derive(serde::Serialize)]
+pub struct Flashcard {
+    pub q: String,
+    pub a: String,
+}
+
+#[tauri::command]
+async fn teacher_explain(
+    level: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<DbLearnTopic, String> {
+    // Pull the most recent screen capture as the context for the lesson.
+    let latest = sqlx::query_as::<_, DbScreenCapture>(
+        "SELECT id, captured_at, app_name, window_title, category, text, confidence
+         FROM screen_captures ORDER BY captured_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (source, title) = match &latest {
+        Some(cap) => (
+            cap.text.clone(),
+            if cap.window_title.is_empty() {
+                cap.app_name.clone()
+            } else {
+                cap.window_title.clone()
+            },
+        ),
+        None => (
+            "(No screen capture available - enable the Screen Log in Settings to feed the Teacher.)".to_string(),
+            "Sample Lesson".to_string(),
+        ),
+    };
+
+    // Cheap deterministic flashcard synthesis: pull the top-N longest sentences
+    // from the source text and pair each with a generated prompt sized to the
+    // learner level. The LLM-backed teacher swaps in here later.
+    let normalized = source.replace('\n', " ");
+    let mut sentences: Vec<&str> = normalized
+        .split(|c: char| c == '.' || c == '!' || c == '?')
+        .map(|s| s.trim())
+        .filter(|s| s.len() > 24)
+        .collect();
+    sentences.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let take = if level == "advanced" { 5 } else { 3 };
+    let picked: Vec<&&str> = sentences.iter().take(take).collect();
+
+    let flashcards: Vec<Flashcard> = if picked.is_empty() {
+        vec![Flashcard {
+            q: format!("What was on screen in {}?", title),
+            a: "Not enough text detected. Try opening a denser document.".to_string(),
+        }]
+    } else {
+        picked
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Flashcard {
+                q: if level == "advanced" {
+                    format!("Synthesize the key idea in passage #{}.", i + 1)
+                } else {
+                    format!("In your own words, what does this passage say? ({}.)", i + 1)
+                },
+                a: s.to_string(),
+            })
+            .collect()
+    };
+
+    let flashcards_json = serde_json::to_string(&flashcards).map_err(|e| e.to_string())?;
+    let id = format!("learn_{}", date_timestamp_string());
+
+    sqlx::query(
+        "INSERT INTO learn_topics (id, source_context, title, level, flashcards_json)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&source)
+    .bind(&title)
+    .bind(&level)
+    .bind(&flashcards_json)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let topic = sqlx::query_as::<_, DbLearnTopic>(
+        "SELECT id, created_at, source_context, title, level, flashcards_json, comprehension_score
+         FROM learn_topics WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(topic)
+}
+
+#[tauri::command]
+async fn get_learn_topics(state: tauri::State<'_, DbState>) -> Result<Vec<DbLearnTopic>, String> {
+    sqlx::query_as::<_, DbLearnTopic>(
+        "SELECT id, created_at, source_context, title, level, flashcards_json, comprehension_score
+         FROM learn_topics ORDER BY created_at DESC LIMIT 30",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn rate_learn_topic(
+    id: String,
+    score: f64,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    sqlx::query("UPDATE learn_topics SET comprehension_score = ? WHERE id = ?")
+        .bind(score.clamp(0.0, 1.0))
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn search_history(
     query: String,
@@ -616,6 +748,21 @@ pub fn run() {
                         DELETE FROM screen_captures_fts WHERE capture_id = old.id;
                         INSERT INTO screen_captures_fts(capture_id, text) VALUES (new.id, new.text);
                     END;"
+                )
+                .execute(&pool)
+                .await?;
+
+                // Phase 9 - learn topics + comprehension scores
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS learn_topics (
+                        id TEXT PRIMARY KEY,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        source_context TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        level TEXT NOT NULL DEFAULT 'beginner',
+                        flashcards_json TEXT NOT NULL,
+                        comprehension_score REAL NOT NULL DEFAULT 0.0
+                    );"
                 )
                 .execute(&pool)
                 .await?;
@@ -883,7 +1030,10 @@ pub fn run() {
             clear_screen_captures,
             set_screen_capture_enabled,
             get_screen_capture_enabled,
-            search_history
+            search_history,
+            teacher_explain,
+            get_learn_topics,
+            rate_learn_topic
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

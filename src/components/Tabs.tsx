@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X, Search, Clock } from "lucide-react";
+import { MessageSquare, Layout, Target, Activity, Send, CheckCircle2, Circle, X, Search, Clock, GraduationCap, Sparkles as SparkleIcon } from "lucide-react";
 
 interface TabsProps {
   username?: string;
-  activeTab: "chat" | "context" | "goals" | "habits";
-  onTabChange: (tab: "chat" | "context" | "goals" | "habits") => void;
+  activeTab: "chat" | "context" | "goals" | "habits" | "learn";
+  onTabChange: (tab: "chat" | "context" | "goals" | "habits" | "learn") => void;
 }
 
 interface Goal {
@@ -47,6 +47,7 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
     { id: "context", label: "Context", icon: Layout },
     { id: "goals", label: "Goals", icon: Target },
     { id: "habits", label: "Habits", icon: Activity },
+    { id: "learn", label: "Learn", icon: GraduationCap },
   ] as const;
 
   // State arrays
@@ -94,6 +95,58 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
   const [searchResults, setSearchResults] = useState<HistorySearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchAttempted, setSearchAttempted] = useState(false);
+
+  // Phase 9: learn tab state
+  const [learnLevel, setLearnLevel] = useState<"beginner" | "advanced">("beginner");
+  const [learnLoading, setLearnLoading] = useState(false);
+  const [learnTopic, setLearnTopic] = useState<{ id: string; title: string; flashcards: { q: string; a: string }[] } | null>(null);
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+
+  const handleExplain = async () => {
+    setLearnLoading(true);
+    setRevealed({});
+    const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+    if (isTauri) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const topic = await invoke<any>("teacher_explain", { level: learnLevel });
+        const cards = JSON.parse(topic.flashcards_json);
+        setLearnTopic({ id: topic.id, title: topic.title, flashcards: cards });
+      } catch (err) {
+        console.error("teacher_explain failed:", err);
+        setLearnTopic({
+          id: "fallback",
+          title: "Sandbox demo",
+          flashcards: [
+            { q: "What is the active concept on screen?", a: "Enable Screen Log in Settings so the Teacher can read your real context." },
+          ],
+        });
+      }
+    } else {
+      setLearnTopic({
+        id: "browser_demo",
+        title: "Browser sandbox demo",
+        flashcards: [
+          { q: "In your own words, what does this passage say? (1.)", a: `${learnLevel === "advanced" ? "Advanced" : "Beginner"} lesson generated from the active window. Wire the Tauri backend to read real screen text.` },
+          { q: "What pattern recurs across the captured snippets?", a: "Cognitive state observations, goal/habit context, and OCR'd window content are blended into one source of truth." },
+        ],
+      });
+    }
+    setLearnLoading(false);
+  };
+
+  const rateLearn = async (score: number) => {
+    if (!learnTopic) return;
+    const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+    if (isTauri) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("rate_learn_topic", { id: learnTopic.id, score });
+      } catch (err) {
+        console.error("rate_learn_topic failed:", err);
+      }
+    }
+  };
 
   const activeAiMessageIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -820,6 +873,79 @@ export const Tabs: React.FC<TabsProps> = ({ username = "Alex", activeTab, onTabC
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {activeTab === "learn" && (
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Adaptive Teacher</h3>
+
+            <div className="glass-card rounded-xl p-4 border border-white/5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider">Lesson level</span>
+                <div className="flex rounded-lg overflow-hidden border border-white/5 bg-slate-950/40">
+                  {(["beginner", "advanced"] as const).map(l => (
+                    <button
+                      key={l}
+                      onClick={() => setLearnLevel(l)}
+                      className={`px-3 py-1 text-[10px] capitalize transition-all cursor-pointer border-none ${
+                        learnLevel === l
+                          ? "bg-violet-600/30 text-violet-100"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                onClick={handleExplain}
+                disabled={learnLoading}
+                className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 active:scale-[0.99] text-white font-medium text-xs py-2 rounded-xl shadow-[0_4px_12px_rgba(139,92,246,0.3)] transition-all cursor-pointer border-none disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <SparkleIcon size={13} />
+                {learnLoading ? "Reading your screen..." : "Explain what I'm looking at"}
+              </button>
+            </div>
+
+            {learnTopic && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-slate-400">
+                  <span className="truncate" title={learnTopic.title}>From: {learnTopic.title}</span>
+                  <span>{learnTopic.flashcards.length} card{learnTopic.flashcards.length === 1 ? "" : "s"}</span>
+                </div>
+                {learnTopic.flashcards.map((c, i) => (
+                  <div
+                    key={i}
+                    onClick={() => setRevealed(r => ({ ...r, [i]: !r[i] }))}
+                    className="glass-card rounded-xl p-4 border border-white/5 cursor-pointer hover:bg-white/[0.02] active:scale-[0.99] transition-all space-y-2"
+                  >
+                    <div className="text-[10px] uppercase tracking-wider text-violet-300">Card {i + 1}</div>
+                    <div className="text-sm text-slate-100 font-medium">{c.q}</div>
+                    {revealed[i] ? (
+                      <div className="text-[11px] text-slate-300 leading-snug border-t border-white/5 pt-2">{c.a}</div>
+                    ) : (
+                      <div className="text-[10px] text-slate-500 italic">Tap to reveal answer</div>
+                    )}
+                  </div>
+                ))}
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <span className="text-[10px] text-slate-500">How did this land?</span>
+                  <div className="flex gap-1">
+                    {[0.25, 0.5, 0.75, 1.0].map(score => (
+                      <button
+                        key={score}
+                        onClick={() => rateLearn(score)}
+                        className="text-[10px] px-2 py-1 rounded bg-white/[0.04] hover:bg-violet-500/20 text-slate-300 hover:text-violet-200 cursor-pointer border-none transition-all"
+                      >
+                        {Math.round(score * 100)}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
