@@ -1003,7 +1003,15 @@ async fn search_history(
     Ok(rows)
 }
 
-fn capture_and_ocr_once() -> Result<(String, String, String, f64), String> {
+struct CaptureRow {
+    app_name: String,
+    window_title: String,
+    category: String,
+    text: String,
+    confidence: f64,
+}
+
+fn capture_and_ocr_once() -> Result<CaptureRow, String> {
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     let primary = monitors
         .into_iter()
@@ -1026,7 +1034,13 @@ fn capture_and_ocr_once() -> Result<(String, String, String, f64), String> {
     // Cheap confidence proxy: longer extractions tend to be richer matches.
     let confidence = ((text.len() as f64) / 500.0).min(1.0);
 
-    Ok((format!("{}|{}", app_name, window_title), category, text, confidence))
+    Ok(CaptureRow {
+        app_name,
+        window_title,
+        category,
+        text,
+        confidence,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1465,32 +1479,27 @@ pub fn run() {
                         continue;
                     }
                     match capture_and_ocr_once() {
-                        Ok((app_title, category, text, confidence)) => {
-                            if text.trim().is_empty() {
+                        Ok(row) => {
+                            if row.text.trim().is_empty() {
                                 continue;
                             }
-                            let mut parts = app_title.splitn(2, '|');
-                            let app_name = parts.next().unwrap_or("").to_string();
-                            let window_title = parts.next().unwrap_or("").to_string();
                             let id = format!("cap_{}", date_timestamp_string());
                             let pool = capture_pool.clone();
                             let app_handle = capture_app_handle.clone();
-                            let category_clone = category.clone();
                             tauri::async_runtime::spawn(async move {
                                 let _ = sqlx::query(
                                     "INSERT INTO screen_captures (id, app_name, window_title, category, text, confidence) VALUES (?, ?, ?, ?, ?, ?)"
                                 )
                                 .bind(&id)
-                                .bind(&app_name)
-                                .bind(&window_title)
-                                .bind(&category_clone)
-                                .bind(&text)
-                                .bind(confidence)
+                                .bind(&row.app_name)
+                                .bind(&row.window_title)
+                                .bind(&row.category)
+                                .bind(&row.text)
+                                .bind(row.confidence)
                                 .execute(&pool)
                                 .await;
                                 let _ = app_handle.emit("screen-capture", &id);
                             });
-                            let _ = category;
                         }
                         Err(e) => {
                             eprintln!("[screen capture] {}", e);

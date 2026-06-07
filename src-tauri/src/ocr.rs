@@ -18,7 +18,9 @@ pub fn ocr_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<String, String> 
     encoder
         .SetPixelData(
             windows::Graphics::Imaging::BitmapPixelFormat::Rgba8,
-            windows::Graphics::Imaging::BitmapAlphaMode::Premultiplied,
+            // xcap returns straight (non-premultiplied) RGBA; tell WinRT that
+            // so OCR sees correct foreground colour, not darkened text.
+            windows::Graphics::Imaging::BitmapAlphaMode::Straight,
             width,
             height,
             96.0,
